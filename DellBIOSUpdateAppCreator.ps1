@@ -1,4 +1,4 @@
-<#	
+﻿<#	
 	.NOTES
 	===========================================================================
 	 Created on:   	10/29/2018
@@ -38,7 +38,7 @@
                 - Value: MODEL NAME  (This is in all Caps with a Space between)
 #>
 
-$Global:SCCMSite = "##SITE:##"
+$Global:SCCMSite = "$("C11"):\"
 
 # BIOS Upgrade App Desired Name
 $Global:BiosAppName = "Upgrade Dell BIOS"
@@ -52,14 +52,14 @@ $Global:LogPath = "C:\Temp\DellBIOSUpgradeLog.log"
 $Global:MaxLogSize = 1000kb
 
 # Package Location Vars
-$Global:ContentLocationRoot = "\\Path\TO\Application\Share"
-$Global:IconRepo = "\\Path\To\Application Icons Share"
-$Global:ApplicationIcon = "$Global:IconRepo\DellBIOSUpdater.ico"
+$Global:ContentLocationRoot = "\\nte123\PKGS\OSD\driversource\Bios-test"
+$Global:IconRepo = "\\nte123\PKGS\OSD\driversource\Bios-test\icons"
+$Global:ApplicationIcon = "$Global:IconRepo\biosdell.ico"
 $Global:BiosAppContentRoot = "$Global:ContentLocationRoot\$Global:BiosAppName"
 
 # SCCM Vars
 $Global:RequirementsTemplateAppName = "Application Requirements Template"
-$Global:PreferredDistributionLoc = "Distribution Point Group Name"
+$Global:PreferredDistributionLoc = "P11 Distribution Points"
 
 # Define Dell Download Sources
 $Global:DellDownloadList = "http://downloads.dell.com/published/Pages/index.html"
@@ -123,7 +123,7 @@ function DellBiosFinder {
 	
 	# Cater for multple bios version matches and select the most recent
 	$DellBIOSFile = $global:DellCatalogXML.Manifest.SoftwareComponent | Where-Object {
-		($_.name.display."#cdata-section" -match "BIOS") -and ($_.name.display."#cdata-section" -match "$model")
+		($_.ComponentType.value -match "BIOS") -and ($_.name.display."#cdata-section" -match "$model")
 	} | Sort-Object ReleaseDate | Select-Object -First 1
 	if ($DellBIOSFile -eq $null) {
 		# Attempt to find BIOS link via Dell model number
@@ -239,6 +239,7 @@ Function Copy-CMDeploymentTypeRule {
 function Update-ModelRequirement {
 	Param (
         [System.String]$ModelName,
+        [System.String]$ModelSKU,
         [System.String]$BIOSApplicationName
 	)
     Push-Location
@@ -257,6 +258,11 @@ function Update-ModelRequirement {
     $TargetedRequirements = $TargetedDT.Requirements | Where-Object Name -EQ "Computer Model Equals MODEL NAME"
     $TargetedRequirements.Name = $TargetedRequirements.Name.Replace("MODEL NAME","$ModelName")
     $TargetedRequirements.SecondOperand.Value = $TargetedRequirements.SecondOperand.Value.Replace("MODEL NAME","$ModelName")
+    $TargetedRequirements.RuleID = "Rule_$([guid]::NewGuid())"
+
+    $TargetedRequirements = $TargetedDT.Requirements | Where-Object Name -EQ "Computer Model SKU One of {MODEL SKU}"
+    $TargetedRequirements.Name = $TargetedRequirements.Name.Replace("MODEL SKU","$ModelSKU")
+    $TargetedRequirements.SecondOperand.Value = $TargetedRequirements.SecondOperand.Value.Replace("MODEL SKU","$ModelSKU")
     $TargetedRequirements.RuleID = "Rule_$([guid]::NewGuid())"
 
     $UpdatedXML = [Microsoft.ConfigurationManagement.ApplicationManagement.Serialization.SccmSerializer]::SerializeToString($AppXML, $True) 
@@ -283,6 +289,10 @@ if (-not (Get-Module ConfigurationManager)) {
 ## Query for Dell Models
 Push-location
 Set-Location $Global:SCCMSite
+#$WMI = @"
+#select distinct SMS_G_System_COMPUTER_SYSTEM.Model from  SMS_R_System inner join SMS_G_System_COMPUTER_SYSTEM on SMS_G_System_COMPUTER_SYSTEM.ResourceID = SMS_R_System.ResourceId where SMS_G_System_COMPUTER_SYSTEM.Manufacturer like "%Dell%" and (SMS_G_System_COMPUTER_SYSTEM.Model like "%Optiplex%" or SMS_G_System_COMPUTER_SYSTEM.Model like "%Precision%" or SMS_G_System_COMPUTER_SYSTEM.Model like "%XPS%" or SMS_G_System_COMPUTER_SYSTEM.Model like "%Latitude%") order by SMS_G_System_COMPUTER_SYSTEM.Model
+#"@
+
 $WMI = @"
 select distinct SMS_G_System_COMPUTER_SYSTEM.Model from  SMS_R_System inner join SMS_G_System_COMPUTER_SYSTEM on SMS_G_System_COMPUTER_SYSTEM.ResourceID = SMS_R_System.ResourceId where SMS_G_System_COMPUTER_SYSTEM.Manufacturer like "%Dell%" and (SMS_G_System_COMPUTER_SYSTEM.Model like "%Optiplex%" or SMS_G_System_COMPUTER_SYSTEM.Model like "%Precision%" or SMS_G_System_COMPUTER_SYSTEM.Model like "%XPS%" or SMS_G_System_COMPUTER_SYSTEM.Model like "%Latitude%") order by SMS_G_System_COMPUTER_SYSTEM.Model
 "@
@@ -298,10 +308,10 @@ foreach ($Model in $QueryResults) {
 }
 Pop-Location
 
-$ModelList | Export-Csv -Path "$Global:TempDir\AllDellModels.csv" -NoTypeInformation
+New-Item -ItemType Directory -Path $Global:TempDir -Force -ErrorAction SilentlyContinue
+$ModelList | Export-Csv -Path "$Global:TempDir\AllDellModels.csv" -NoTypeInformation -Force
 $AllDellModels = $ModelList | Select-Object Model -ExpandProperty Model
 
-New-Item -ItemType Directory -Path $Global:TempDir -Force -ErrorAction SilentlyContinue
 $ProgressPreference = "SilentlyContinue"
 #Invoke-WebRequest -Uri $DellCatalogSource -OutFile "$Global:TempDir\$DellCatalogFile"
 if ($?) {
@@ -343,10 +353,12 @@ Foreach ($DellModel in $AllDellModels){
 
     # Download Driver and Copy to Share
     $DellBIOSDownload = DellBiosFinder -Model $DellModel
+    $DellBIOSDownload | add-member "DellName" -NotePropertyValue $($DellBIOSDownload.name.display."#cdata-section")
+    $DellBIOSDownload | add-member "DellSKU" -NotePropertyValue $($DellBIOSDownload.SupportedSystems.brand.model.systemid) 
 	$DellBIOSVersion = $DellBIOSDownload.DellVersion
 	$BIOSDownload = $DellDownloadBase + "/" + $($DellBIOSDownload.Path)
 	$BIOSName = "$($DellModel.Replace(' ', '_'))_$DellBIOSVersion.exe"
-	if (-not (Test-Path "$DestDir\$BIOSName")) {
+	if (-not (Test-Path "$Global:TempDir\$BIOSName")) {
         Add-LogContent "$BIOSDownload"
 		Invoke-WebRequest -Uri "$BIOSDownload" -OutFile "$Global:TempDir\$BIOSName"
     }
@@ -378,7 +390,7 @@ Foreach ($DellModel in $AllDellModels){
         Copy-CMDeploymentTypeRule -SourceApplicationName $Global:RequirementsTemplateAppName -DestApplicationName $Global:BiosAppName -DestDeploymentTypeName $DellModel -RuleName "Computer Model Equals MODEL NAME"
 
         # Update Requirement for Model
-        Update-ModelRequirement -ModelName $DellModel -BIOSApplicationName $Global:BiosAppName
+        Update-ModelRequirement -ModelName $DellModel -ModelSKU $ModelSKU -BIOSApplicationName $Global:BiosAppName
     }
     Else {
         Add-LogContent "ERROR: Downloading BIOS File for $DellModel has Failed!"
